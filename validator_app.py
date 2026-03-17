@@ -384,6 +384,16 @@ def main():
             sheet_names,
         )
 
+    # ---- Per-sheet persistence setup ----
+    if "sheet_edits" not in st.session_state:
+        st.session_state.sheet_edits = {}   # {sheet_name: rows}
+    if "sheet_headers" not in st.session_state:
+        st.session_state.sheet_headers = {} # {sheet_name: headers}
+    if "sheet_errors" not in st.session_state:
+        st.session_state.sheet_errors = {}  # {sheet_name: errors}
+    if "sheet_validated_cols" not in st.session_state:
+        st.session_state.sheet_validated_cols = {}  # {sheet_name: selected_columns}
+
     # ---- Read the selected sheet ----
     try:
         headers, rows = read_excel(io.BytesIO(file_bytes), sheet_name=selected_sheet)
@@ -391,9 +401,18 @@ def main():
         st.error(f"Failed to read Excel file: {e}")
         return
 
+    # Always store original headers per sheet
+    st.session_state.sheet_headers[selected_sheet] = headers
+
     if not rows:
         st.warning("The selected sheet has no data rows (only a header or empty).")
         return
+
+    # Show which sheets have been edited
+    if len(sheet_names) > 1:
+        edited_sheets = [s for s in sheet_names if s in st.session_state.sheet_edits]
+        if edited_sheets:
+            st.info(f"Sheets with saved edits: **{', '.join(edited_sheets)}**")
 
     sheet_label = f" (sheet: **{selected_sheet}**)" if len(sheet_names) > 1 else ""
     st.success(
@@ -436,23 +455,26 @@ def main():
     # Run Validation button
     run_clicked = st.button("Run Validation", type="primary")
 
-    if not run_clicked and "validation_errors" not in st.session_state:
+    # Check if this sheet already has saved validation results
+    has_prior_results = selected_sheet in st.session_state.sheet_errors
+
+    if not run_clicked and not has_prior_results:
         st.info("Select the columns you want to validate, then click **Run Validation**.")
         return
 
     # ---- Run validation ----
     if run_clicked:
-        # Reset edited rows on fresh validation
-        st.session_state.pop("edited_rows", None)
         errors = validate_rows(rows, selected_columns)
-        st.session_state.validation_errors = errors
-        st.session_state.validated_columns = selected_columns
+        st.session_state.sheet_errors[selected_sheet] = errors
+        st.session_state.sheet_validated_cols[selected_sheet] = selected_columns
+        # Clear per-sheet edits on fresh validation
+        st.session_state.sheet_edits.pop(selected_sheet, None)
     else:
-        errors = st.session_state.validation_errors
-        selected_columns = st.session_state.validated_columns
+        errors = st.session_state.sheet_errors[selected_sheet]
+        selected_columns = st.session_state.sheet_validated_cols[selected_sheet]
 
-    # Use edited rows if available (after Edit & Fix → Re-validate)
-    active_rows = st.session_state.get("edited_rows", rows)
+    # Use edited rows for this sheet if available
+    active_rows = st.session_state.sheet_edits.get(selected_sheet, rows)
 
     # ---- Summary Dashboard ----
     st.markdown("---")
@@ -572,36 +594,56 @@ def main():
                 # Filter out completely empty rows
                 new_rows = [r for r in new_rows if not is_row_empty(r)]
                 new_errors = validate_rows(new_rows, selected_columns)
-                st.session_state.validation_errors = new_errors
-                st.session_state.validated_columns = selected_columns
-                st.session_state.edited_rows = new_rows
+                st.session_state.sheet_errors[selected_sheet] = new_errors
+                st.session_state.sheet_validated_cols[selected_sheet] = selected_columns
+                st.session_state.sheet_edits[selected_sheet] = new_rows
                 st.rerun()
 
-        # Download button
+        # Download button — merges edits from ALL sheets
         with col_b:
-            # Use edited rows if available, otherwise original
-            save_rows = st.session_state.get("edited_rows", active_rows)
             output = io.BytesIO()
             wb_out = openpyxl.Workbook()
-            ws_out = wb_out.active
-            ws_out.title = selected_sheet if 'selected_sheet' in dir() else "Sheet1"
-            # Write headers
-            for ci, h in enumerate(headers):
-                ws_out.cell(row=1, column=ci + 1, value=h)
-            # Write data
-            for ri, row in enumerate(save_rows):
-                for ci in range(TOTAL_COLUMNS):
-                    val = row[ci] if ci < len(row) else None
-                    # Try to preserve numbers
-                    if isinstance(val, str):
-                        try:
-                            val = int(val)
-                        except ValueError:
+            # Remove default sheet; we'll create one per source sheet
+            wb_out.remove(wb_out.active)
+
+            for sname in sheet_names:
+                ws_out = wb_out.create_sheet(title=sname)
+                # Get headers for this sheet
+                s_headers = st.session_state.sheet_headers.get(sname)
+                if s_headers is None:
+                    # Read original headers if not yet loaded
+                    try:
+                        s_headers, s_orig_rows = read_excel(
+                            io.BytesIO(file_bytes), sheet_name=sname
+                        )
+                        st.session_state.sheet_headers[sname] = s_headers
+                    except Exception:
+                        continue
+                else:
+                    _, s_orig_rows = read_excel(
+                        io.BytesIO(file_bytes), sheet_name=sname
+                    )
+
+                # Use edited rows if available, otherwise original
+                s_rows = st.session_state.sheet_edits.get(sname, s_orig_rows)
+
+                # Write headers
+                for ci, h in enumerate(s_headers):
+                    ws_out.cell(row=1, column=ci + 1, value=h)
+                # Write data
+                for ri, row in enumerate(s_rows):
+                    for ci in range(TOTAL_COLUMNS):
+                        val = row[ci] if ci < len(row) else None
+                        if isinstance(val, str):
                             try:
-                                val = float(val)
+                                val = int(val)
                             except ValueError:
-                                pass
-                    ws_out.cell(row=ri + 2, column=ci + 1, value=val)
+                                try:
+                                    val = float(val)
+                                except ValueError:
+                                    pass
+                        ws_out.cell(row=ri + 2, column=ci + 1, value=val)
+
             wb_out.save(output)
             st.download_button(
                 label="Download Corrected File",

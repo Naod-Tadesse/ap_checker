@@ -324,10 +324,10 @@ def build_html_table(headers, rows, errors, selected_columns):
     .vtable { border-collapse: collapse; width: 100%; font-size: 13px; }
     .vtable th { background: #262730; color: #fafafa; padding: 6px 8px;
                  border: 1px solid #444; text-align: left; white-space: nowrap; }
-    .vtable td { padding: 5px 8px; border: 1px solid #ddd; }
-    .cell-ok  { background-color: #d4edda; }
-    .cell-err { background-color: #f8d7da; }
-    .cell-skip { background-color: #f0f0f0; }
+    .vtable td { padding: 5px 8px; border: 1px solid #444; color: #fafafa; }
+    .cell-ok  { background-color: #1e3a2a; }
+    .cell-err { background-color: #3a1e1e; }
+    .cell-skip { background-color: #1e1e2e; }
     </style>"""
     html += '<div style="overflow-x:auto;"><table class="vtable"><thead><tr>'
     html += "<th>Row</th>"

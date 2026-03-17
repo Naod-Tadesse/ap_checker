@@ -442,6 +442,8 @@ def main():
 
     # ---- Run validation ----
     if run_clicked:
+        # Reset edited rows on fresh validation
+        st.session_state.pop("edited_rows", None)
         errors = validate_rows(rows, selected_columns)
         st.session_state.validation_errors = errors
         st.session_state.validated_columns = selected_columns
@@ -449,11 +451,14 @@ def main():
         errors = st.session_state.validation_errors
         selected_columns = st.session_state.validated_columns
 
+    # Use edited rows if available (after Edit & Fix → Re-validate)
+    active_rows = st.session_state.get("edited_rows", rows)
+
     # ---- Summary Dashboard ----
     st.markdown("---")
     st.subheader("Validation Summary")
 
-    total_rows = len(rows)
+    total_rows = len(active_rows)
     total_error_count = sum(len(e) for e in errors.values())
     invalid_rows = len(errors)
     valid_rows = total_rows - invalid_rows
@@ -476,31 +481,134 @@ def main():
         ).sort_values("Errors", ascending=False)
         st.bar_chart(chart_df.set_index("Column"))
 
-    # ---- Color-coded Data Table ----
+    # ---- Tabs: Validation View / Edit & Fix ----
     st.markdown("---")
-    st.subheader("Data Table")
-    html_table = build_html_table(headers, rows, errors, set(selected_columns))
-    st.markdown(html_table, unsafe_allow_html=True)
+    tab_view, tab_edit = st.tabs(["Validation View", "Edit & Fix"])
 
-    # ---- Error Details Panel ----
-    st.markdown("---")
-    st.subheader("Error Details")
+    # -- Tab 1: Color-coded read-only table + error details --
+    with tab_view:
+        st.subheader("Data Table")
+        html_table = build_html_table(headers, active_rows, errors, set(selected_columns))
+        st.markdown(html_table, unsafe_allow_html=True)
 
-    show_errors_only = st.checkbox("Show only rows with errors", value=False)
+        st.markdown("---")
+        st.subheader("Error Details")
 
-    if total_error_count == 0:
-        st.success("No validation errors found!")
-    else:
-        for row_idx in range(total_rows):
-            if row_idx not in errors:
-                if show_errors_only:
-                    continue
-                st.write(f"**Row {row_idx + 2}** — Valid")
+        show_errors_only = st.checkbox("Show only rows with errors", value=False)
+
+        if total_error_count == 0:
+            st.success("No validation errors found!")
+        else:
+            for row_idx in range(total_rows):
+                if row_idx not in errors:
+                    if show_errors_only:
+                        continue
+                    st.write(f"**Row {row_idx + 2}** — Valid")
+                else:
+                    row_errs = errors[row_idx]
+                    with st.expander(f"Row {row_idx + 2} — {len(row_errs)} error(s)", expanded=False):
+                        for col_idx, msg in row_errs:
+                            st.error(msg)
+
+    # -- Tab 2: Editable table + re-validate + download --
+    with tab_edit:
+        st.subheader("Edit Data")
+        st.caption("Fix errors directly in the table below, then re-validate or download.")
+
+        # Show compact error guide if there are errors
+        if total_error_count > 0:
+            with st.expander(f"**{total_error_count} error(s) to fix** — click to see where", expanded=True):
+                for row_idx in sorted(errors.keys()):
+                    row_errs = errors[row_idx]
+                    cols_with_errors = [
+                        f"**{COL_LETTERS[ci]}** ({COLUMN_RULES[ci]['header']}): {msg.split(': ', 1)[1]}"
+                        for ci, msg in row_errs
+                    ]
+                    st.markdown(
+                        f"Row **{row_idx + 2}** — " + " | ".join(cols_with_errors)
+                    )
+
+        # Build a DataFrame for editing with an Errors column
+        col_names = [f"{COL_LETTERS[i]} - {headers[i]}" if i < len(headers) else COL_LETTERS[i]
+                     for i in range(TOTAL_COLUMNS)]
+        display_rows = []
+        error_markers = []
+        for ri, row in enumerate(active_rows):
+            display_rows.append([display_value(row[ci], ci) for ci in range(TOTAL_COLUMNS)])
+            if ri in errors:
+                err_cols = [COL_LETTERS[ci] for ci, _ in errors[ri]]
+                error_markers.append(f"{len(errors[ri])}  [{', '.join(err_cols)}]")
             else:
-                row_errs = errors[row_idx]
-                with st.expander(f"Row {row_idx + 2} — {len(row_errs)} error(s)", expanded=False):
-                    for col_idx, msg in row_errs:
-                        st.error(msg)
+                error_markers.append("")
+
+        edit_df = pd.DataFrame(display_rows, columns=col_names)
+        edit_df.insert(0, "Errors", error_markers)
+        edit_df.index = [i + 2 for i in range(len(edit_df))]
+        edit_df.index.name = "Row"
+
+        # Make the Errors column non-editable
+        column_config = {"Errors": st.column_config.TextColumn("Errors", disabled=True)}
+        edited_df = st.data_editor(
+            edit_df, use_container_width=True, num_rows="dynamic",
+            column_config=column_config,
+        )
+
+        col_a, col_b, _ = st.columns([1, 1, 3])
+
+        # Re-validate button
+        with col_a:
+            if st.button("Re-validate", type="primary"):
+                # Convert edited DataFrame back to row lists (skip "Errors" col at index 0)
+                new_rows = []
+                for _, df_row in edited_df.iterrows():
+                    new_row = []
+                    for ci in range(TOTAL_COLUMNS):
+                        val = df_row.iloc[ci + 1]  # +1 to skip "Errors" column
+                        if pd.isna(val) or (isinstance(val, str) and val.strip() == ""):
+                            new_row.append(None)
+                        else:
+                            new_row.append(val)
+                    new_rows.append(new_row)
+                # Filter out completely empty rows
+                new_rows = [r for r in new_rows if not is_row_empty(r)]
+                new_errors = validate_rows(new_rows, selected_columns)
+                st.session_state.validation_errors = new_errors
+                st.session_state.validated_columns = selected_columns
+                st.session_state.edited_rows = new_rows
+                st.rerun()
+
+        # Download button
+        with col_b:
+            # Use edited rows if available, otherwise original
+            save_rows = st.session_state.get("edited_rows", active_rows)
+            output = io.BytesIO()
+            wb_out = openpyxl.Workbook()
+            ws_out = wb_out.active
+            ws_out.title = selected_sheet if 'selected_sheet' in dir() else "Sheet1"
+            # Write headers
+            for ci, h in enumerate(headers):
+                ws_out.cell(row=1, column=ci + 1, value=h)
+            # Write data
+            for ri, row in enumerate(save_rows):
+                for ci in range(TOTAL_COLUMNS):
+                    val = row[ci] if ci < len(row) else None
+                    # Try to preserve numbers
+                    if isinstance(val, str):
+                        try:
+                            val = int(val)
+                        except ValueError:
+                            try:
+                                val = float(val)
+                            except ValueError:
+                                pass
+                    ws_out.cell(row=ri + 2, column=ci + 1, value=val)
+            wb_out.save(output)
+            st.download_button(
+                label="Download Corrected File",
+                data=output.getvalue(),
+                file_name=f"corrected_{uploaded_file.name}",
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            )
 
 
 if __name__ == "__main__":

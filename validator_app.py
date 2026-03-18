@@ -205,6 +205,9 @@ def display_value(value, col_idx):
             dt = excel_serial_to_date(value)
             if dt:
                 return dt.strftime("%Y-%m-%d")
+    # Avoid displaying whole numbers as floats (e.g. 912345678.0 → 912345678)
+    if isinstance(value, float) and value == int(value):
+        return str(int(value))
     return str(value).strip()
 
 
